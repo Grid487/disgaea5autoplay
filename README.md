@@ -1,6 +1,6 @@
 # Disgaea 5 Autoplay
 
-An unofficial **Disgaea 5 Complete** mod for Windows that automates battles and can repeat a supported stage. Written in **C++17**, it loads as an x64 XInput proxy DLL beside the game executable.
+A **Disgaea 5 Complete** mod for Windows that automates battles and can repeat a supported stage. Written in **C++17**, it loads as an x64 XInput proxy DLL beside the game executable.
 
 **Current version: v5.4.2.** Combat autoplay and stage repeat are separate toggles, and both start disabled.
 
