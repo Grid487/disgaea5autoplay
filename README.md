@@ -4,6 +4,9 @@ An unofficial **Disgaea 5 Complete** mod for Windows that automates battles and 
 
 **Current version: v5.4.2.** Combat autoplay and stage repeat are separate toggles, and both start disabled.
 
+## Preview
+https://www.youtube.com/watch?v=3MRZhXz_9wY
+
 ## Features
 
 - Automatic deployment, movement, basic attacks, learned offensive skills, healing, and turn advancement.
