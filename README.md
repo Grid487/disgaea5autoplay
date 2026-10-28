@@ -167,9 +167,7 @@ Close the game and remove this mod's `XINPUT9_1_0.dll`. If you replaced another 
 | `mod_src/planning_budget.h`, `mod_src/tactical_path.h` | Bounded planning and tactical path support |
 | `mod_src/stage_repeat.h` | Stage-repeat state machine |
 | `mod_src/build.ps1` | Staged build and backup-preserving installation |
-
-For a public repository, include original mod source, tests, and documentation only. Compiled mod releases may include the mod DLL and license. **Do not upload the game executable, game archives or assets, saves, logs, backups, build intermediates, or private/decompiled game research.** The development folder lives inside a game installation; it is not itself a ready-to-upload repository.
-
+  
 ## Credits
 
 Developed with **OpenAI Codex, using GPT-6-family agents**, with human direction and in-game feedback. Reverse-engineering and modding work used **Reverse Engineer Anything (REA)**, **Universal Modder**, and local analysis tools including Ghidra. Builds use Microsoft Visual Studio C++ Build Tools.
