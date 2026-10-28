@@ -166,7 +166,6 @@ Close the game and remove this mod's `XINPUT9_1_0.dll`. If you replaced another 
 | `mod_src/native_*.h` | Adapters to verified native game contracts |
 | `mod_src/planning_budget.h`, `mod_src/tactical_path.h` | Bounded planning and tactical path support |
 | `mod_src/stage_repeat.h` | Stage-repeat state machine |
-| `mod_src/tests/` | Offline tests and runners |
 | `mod_src/build.ps1` | Staged build and backup-preserving installation |
 
 For a public repository, include original mod source, tests, and documentation only. Compiled mod releases may include the mod DLL and license. **Do not upload the game executable, game archives or assets, saves, logs, backups, build intermediates, or private/decompiled game research.** The development folder lives inside a game installation; it is not itself a ready-to-upload repository.
