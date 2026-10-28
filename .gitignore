@@ -1,0 +1,37 @@
+# Game files and extracted content stay local.
+/disgaea5.exe
+/Data/
+/d5extract/
+/d5tools/
+/nisanim/
+*.cpk
+*.pak
+
+# Compiled output, installer backups, and runtime logs.
+**/build/
+**/backups/
+*.exe
+*.dll
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.log
+*.dmp
+*.bak
+*.tmp
+
+# Private analysis and local continuation notes.
+/mod_src/research/
+/CONTINUE_DEVELOPMENT.md
+/github-upload/
+
+# Local credentials and editor files.
+.env
+.env.*
+.vs/
+.vscode/
+Thumbs.db
+desktop.ini
+.DS_Store
