@@ -49,7 +49,7 @@ Other mods that use the same `XINPUT9_1_0.dll` filename conflict with this insta
 ## Installation
 
 1. Close the game and back up your saves.
-2. Obtain a compiled mod DLL or [build it from source](#building-from-source).
+2. [Build it from source](#building-from-source).
 3. Put the mod's `XINPUT9_1_0.dll` in the same folder as `disgaea5.exe`. Preserve any existing DLL with that name first.
 4. Launch the game normally and enter a stage.
 5. Press **F1** for combat autoplay. Optionally enable **F2** before the stage finishes to repeat it.
