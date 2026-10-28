@@ -129,19 +129,7 @@ powershell -ExecutionPolicy Bypass -File .\mod_src\build.ps1
 
 Build output goes to `mod_src/build/<timestamp>/`. The manifest records source, executable, and DLL hashes. Installation verifies a backup of the previous DLL, replaces the installed DLL, and verifies its hash. It refuses installation while a Disgaea 5 process is detected. Failed compilation leaves the installed DLL unchanged.
 
-Previous DLL backups are stored in `mod_src/backups/builds/`. The normal build does not enable the optional profiling or synthetic-notification development switches.
-
-## Tests and validation
-
-Run the offline suites from the game folder:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\mod_src\tests\run_all_tests.ps1
-```
-
-All **18 suites** passed for v5.4.2, retaining the original **16 path and state regressions**. Coverage includes healing, SP reserves, elemental preference, safe area placement, queue coordination, deployment, detours, stale confirmations, planning budgets, cache invalidation, notification handling, and independent stage repeat. Archived comparisons check that optimized movement-goal searches preserve their complete results.
-
-Offline tests use fake memory and stub engine functions; they do not operate the game. Live checks separately covered offensive skills, stage clear, repeat transitions, planning timings, and native single-OK notifications using synthetic test text. An emergency-healing scenario was not forced in the latest live timing run. Passing offline checks does not establish compatibility with another executable or every stage.
+Previous DLL backups are stored in `mod_src/backups/builds/`. The normal build does not enable the optional profiling or synthetic-notification development switches. 
 
 ## Limitations
 
