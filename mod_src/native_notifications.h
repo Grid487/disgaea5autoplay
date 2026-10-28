@@ -69,6 +69,16 @@ inline Phase BattlePhase(uintptr_t base, uintptr_t task, int* observedState = nu
         if (Read(task + kClearTaskOffset, vtable) && vtable == base + kClearTaskVtableRva)
             return Phase::Clear;
         return Phase::Other;
+    case 0x23: {
+        // 4A1FE0 is the post-clear modal barrier. 6197C0 completes the
+        // verified clear task at state8/status2 before this phase waits for
+        // surrender/reward OK notices. Bare state23 is not sufficient.
+        int clearState=-1,clearStatus=-1;
+        if(Read(task+kClearTaskOffset,vtable) && vtable==base+kClearTaskVtableRva &&
+           Read(task+kClearTaskOffset+0x14,clearState) && clearState==8 &&
+           Read(task+kClearTaskOffset+0x18,clearStatus) && clearStatus==2)return Phase::Clear;
+        return Phase::Other;
+    }
     default: return Phase::Other; // Hub, exits, unknown/other result states stay manual.
     }
 }

@@ -52,7 +52,7 @@ class Controller {
     bool Accepted(const Observation& o) const {
         switch (pending_.command) {
         case Command::ConfirmNotice:
-            return o.screen != Screen::ClearNotice || o.instance != pending_.instance;
+            return o.screen != Screen::ClearNotice || o.instance != pending_.instance || o.revision != pending_.revision;
         case Command::SelectStage:
             return o.screen == Screen::Selection && o.selected == stage_;
         case Command::Replay: case Command::StartStage:

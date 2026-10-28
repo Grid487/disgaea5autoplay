@@ -5,7 +5,8 @@ $ErrorActionPreference = "Stop"
 $vscvars = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
 $srcDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
 $rootDir = Split-Path -Parent $srcDir
-$buildRoot = Join-Path $srcDir "build"
+$devDir = Join-Path $rootDir "mod_dev"
+$buildRoot = Join-Path $devDir "build"
 $outDll = Join-Path $rootDir "XINPUT9_1_0.dll"
 
 if (-not (Test-Path -LiteralPath $vscvars -PathType Leaf)) {
@@ -25,6 +26,13 @@ $stagedLib = Join-Path $stageDir "XINPUT9_1_0.lib"
 $stagedObj = Join-Path $stageDir "xinput_proxy.obj"
 
 $qaDefine = if ($NativeNotificationQA) { ' /DD5_NATIVE_NOTIFICATION_QA' } else { '' }
+if ($NativeNotificationQA) {
+    $qaSupportDir = Join-Path $devDir 'support'
+    if (-not (Test-Path -LiteralPath (Join-Path $qaSupportDir 'native_notification_qa.h') -PathType Leaf)) {
+        throw 'NativeNotificationQA requires the local development header in mod_dev/support. Normal builds need only mod_src.'
+    }
+    $qaDefine += ' /I"' + $qaSupportDir + '"'
+}
 if ($ProfilePlanning) { $qaDefine += ' /DD5_QUERY_PROFILE' }
 if ($NativeNotificationQA) { Write-Warning 'DEVELOPMENT TEST BUILD: creates two synthetic-text native OK notices. Reinstall a normal build after testing.' }
 $cmd = 'call "' + $vscvars + '" && cd /d "' + $srcDir + '" && cl.exe /nologo /std:c++17 /O2 /EHsc /MT /LD' + $qaDefine + ' /Fo:"' + $stagedObj + '" xinput_proxy.cpp user32.lib /link /DEF:xinput9_1_0.def /OUT:"' + $stagedDll + '" /IMPLIB:"' + $stagedLib + '"'
@@ -43,8 +51,11 @@ Get-ChildItem -LiteralPath $srcDir -File | Where-Object {
 } | Sort-Object Name | ForEach-Object {
     $sourceHashes += @{ file = $_.Name; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
 }
+if ($NativeNotificationQA) {
+    $sourceHashes += @{ file = '../mod_dev/support/native_notification_qa.h'; sha256 = (Get-FileHash -LiteralPath (Join-Path $qaSupportDir 'native_notification_qa.h') -Algorithm SHA256).Hash }
+}
 $manifest = @{
-    version = if ($NativeNotificationQA) { 'v5.4.2-native-notification-qa' } else { 'v5.4.2-low-latency-planning' }
+    version = if ($NativeNotificationQA) { 'v5.5.2-native-notification-qa' } else { 'v5.5.2-surrender-notification' }
     nativeNotificationQA = [bool]$NativeNotificationQA
     profilePlanning = [bool]$ProfilePlanning
     build = $buildId
@@ -72,7 +83,7 @@ if ($gameProcess) {
 
 $backupDll = $null
 if (Test-Path -LiteralPath $outDll -PathType Leaf) {
-    $backupRoot = Join-Path $srcDir "backups\builds"
+    $backupRoot = Join-Path $devDir "backups\builds"
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
     $backupId = Get-Date -Format "yyyyMMdd-HHmmss-fff"
     $backupDir = Join-Path $backupRoot $backupId

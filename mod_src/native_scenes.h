@@ -20,6 +20,11 @@ struct Registry {
     int desired = -1, current = -1, count = 0;
 };
 using Update = uint64_t (__fastcall*)();
+inline bool Settled(const Registry& registry,int scene) {
+    // Scene manager consumes requested transitions by writing -1. Keeping the
+    // current scene ID here would reject the normal idle hub forever.
+    return registry.current==scene && (registry.desired==-1 || registry.desired==scene);
+}
 inline bool ReadRegistry(uintptr_t base, Registry& out) {
     out = {};
     return NativeNotifications::Read(base + kManagerPointerRva, out.manager) && out.manager &&

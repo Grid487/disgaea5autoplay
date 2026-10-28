@@ -22,6 +22,7 @@ struct XINPUT_STATE_DATA {
 };
 
 #define XBTN_BACK        0x0020
+#define XBTN_LEFT_THUMB  0x0040
 #define XBTN_RIGHT_THUMB 0x0080
 
 // Game Action IDs (index into KeyConfig at +0x50 + actionId * 8)

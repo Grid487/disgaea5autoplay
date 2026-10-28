@@ -43,6 +43,7 @@ inline int lastBattleState = -1;
 inline P::Observation lastObservation;
 inline uint32_t reportedCycles = 0;
 inline bool stopReported = false;
+inline uint64_t (*readClock)() = []() -> uint64_t { return GetTickCount64(); };
 
 inline bool SpecialStage(int id) {
     // 642070 routes these IDs through custom capacity/choice handling.
@@ -84,7 +85,7 @@ inline bool WinningParty() {
 }
 
 inline bool ReadBattle(uintptr_t base, uintptr_t task, P::Observation& out) {
-    out = {}; out.nowMs = GetTickCount64(); out.instance = task;
+    out = {}; out.nowMs = readClock(); out.instance = task;
     uintptr_t vtable = 0, context = 0, globalContext = 0;
     int state = -1, transition = -1;
     uint8_t mode = 0;
@@ -103,26 +104,33 @@ inline bool ReadBattle(uintptr_t base, uintptr_t task, P::Observation& out) {
     out.screen = P::Screen::Battle;
     out.ready = out.settled;
     out.revision = static_cast<uint64_t>(state) << 32;
-    if (state == 0x20) {
+    if (state == 0x20 || state == 0x23) {
         if (N::BattlePhase(base, task) != N::Phase::Clear || !out.normalStage) return false;
         if (!verifiedClear && WinningParty()) {
             verifiedClear = true;
-            LogMsg("[Repeat] Verified clear stage=%d variant=%d state=0x20 mode=1 livingParty=1 liveEnemies=0",
-                   out.stage.stage, out.stage.variant);
+            LogMsg("[Repeat] Verified clear stage=%d variant=%d state=0x%02X mode=1 livingParty=1 liveEnemies=0",
+                   out.stage.stage, out.stage.variant,state);
         }
         out.outcome = verifiedClear ? P::Outcome::Victory : P::Outcome::Unknown;
         uintptr_t notice = 0;
         if (!N::Foreground(base, notice)) return false;
         out.screen = notice ? P::Screen::ClearNotice : P::Screen::Results;
         if (notice) {
-            uintptr_t type = 0; int inputMode = 0;
+            uintptr_t type = 0,uiToken=0; int inputMode = 0;
             out.instance = notice; out.ready = N::Ready(base, notice, task);
+            // The same modal can span20->23 while opening. Its UI lifetime,
+            // not the surrounding battle phase, identifies pending Confirm.
+            if(!N::Read(notice+0x2EB0,uiToken))return false;
+            out.revision=uiToken;
             if (!N::Read(notice, type) || type != base + N::kVtableRva ||
                 !N::Read(notice + 0x1C, inputMode) || inputMode != 1) {
                 out.screen = P::Screen::Unknown; out.settled = true;
             }
         }
-        else {
+        else if(state==0x23) {
+            // Original4A1FE0 advances automatically after the queue empties.
+            out.screen=P::Screen::Loading;out.ready=out.settled=false;
+        } else {
             int inner = -1, sub = -1, childTransition = -1;
             const uintptr_t clearTask = task + N::kClearTaskOffset;
             if (!N::Read(clearTask + 0x14, inner) || !N::Read(clearTask + 0x65E0, sub) ||
@@ -131,7 +139,7 @@ inline bool ReadBattle(uintptr_t base, uintptr_t task, P::Observation& out) {
             // 61DD30 waits on fresh Confirm at state2; 61D2A0 at state3/sub8.
             out.ready = out.settled && childTransition == 1 && (inner == 2 || (inner == 3 && sub == 8));
         }
-    } else if (state == 0x21 || state == 0x23 || state == 0x2A) {
+    } else if (state == 0x21 || state == 0x2A) {
         out.screen = P::Screen::Loading; out.settled = false; out.ready = false;
         out.outcome = verifiedClear ? P::Outcome::Victory : P::Outcome::Unknown;
     } else if (state <= 1 || state == 0x30 || state == 0x31) {
@@ -152,7 +160,7 @@ struct Selector {
 };
 inline bool ReadSelector(uintptr_t base, uintptr_t task, P::StageKey target, Selector& out) {
     out = {}; out.task = task;
-    out.observation.nowMs = GetTickCount64(); out.observation.instance = task;
+    out.observation.nowMs = readClock(); out.observation.instance = task;
     uintptr_t vtable = 0;
     int state = -1, transition = -1, cursor = -1, scroll = -1;
     int16_t count = 0;

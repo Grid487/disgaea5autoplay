@@ -8,11 +8,12 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include "party_roster.h"
 
 namespace AutoPlay::Combat {
 
 constexpr int kMaxUnits = 256;
-constexpr int kMaxDeployments = 5;
+constexpr int kMaxDeployments = Party::kAutomaticLimit; // Compatibility alias for the default party.
 constexpr double kEmergencyHpFraction = 0.25;
 constexpr double kOrdinaryHealHpFraction = 0.50;
 constexpr double kMinimumUsefulHealFraction = 0.20;
@@ -470,13 +471,13 @@ inline std::vector<int> SelectDeployment(const BattleSnapshot& battle,
     std::array<bool, kMaxUnits> included{};
     for (int index = 0; index < kMaxUnits; ++index) {
         const UnitSnapshot* unit = GetUnit(battle, index);
-        if (unit && unit->faction == Faction::Player && unit->deployed) {
+        if (unit && unit->faction == Faction::Player && unit->deployed && unit->alive) {
             selected.push_back(index);
             included[static_cast<size_t>(index)] = true;
         }
     }
     if (maxSlots < 0) maxSlots = 0;
-    maxSlots = std::min(maxSlots, kMaxDeployments);
+    maxSlots = std::min(maxSlots, Party::kMaximumMembers);
     maxSlots = std::max(maxSlots, static_cast<int>(selected.size())); // Never remove deployed units.
     int bestHealer = -1;
     for (int index : rosterOrder) {

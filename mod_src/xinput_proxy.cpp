@@ -6,8 +6,9 @@
 #include "native_deployment.h"
 #include "native_notifications.h"
 #include "native_repeat.h"
+#include "native_party_runtime.h"
 #ifdef D5_NATIVE_NOTIFICATION_QA
-#include "native_notification_qa.h"
+#include <native_notification_qa.h>
 #endif
 #include <atomic>
 #include <stdarg.h>
@@ -19,6 +20,8 @@ static FILE* g_LogFile = nullptr;
 static HWND  g_GameHwnd = nullptr;
 static bool  g_PrevToggleKey = false;
 static bool  g_PrevPadCombo  = false;
+static bool  g_PrevPartyKey = false;
+static bool  g_PrevPartyCombo = false;
 static uintptr_t g_NotificationBattleTask = 0;
 static NativeNotifications::Update orig_NotificationUpdate = nullptr;
 static FnBattleExecute orig_SelectorExecute = nullptr;
@@ -44,6 +47,9 @@ static float g_PendingMovePriorTargetWZ = 0.0f;
 static bool g_PendingDeployment = false;
 static int32_t g_PendingDeploymentCount = 0;
 static int32_t g_PendingDeploymentTicks = 0;
+static uint64_t g_PendingDeploymentIdentity = 0;
+static int g_EligibilityLiving = -1, g_EligibilityCapacity = -1, g_EligibilityOccupant = -2;
+static void PauseForDeployment(const char* reason);
 static int g_CombatUiPhase = -1;
 static int g_CombatUiFrames = 0;
 static NativeActionPositions::GoalJob g_GoalJob;
@@ -123,6 +129,9 @@ static void ResetAutoPlayTurnTracking() {
     g_PendingMoveToX = g_PendingMoveToZ = -1;
     g_PendingDeployment = false;
     g_PendingDeploymentTicks = 0;
+    g_PendingDeploymentIdentity = 0;
+    g_EligibilityLiving = g_EligibilityCapacity = -1;
+    g_EligibilityOccupant = -2;
 }
 
 static void BeginPendingMove(int32_t unitIdx, int targetX, int targetZ) {
@@ -190,15 +199,29 @@ static void FinishPendingMoveIfObserved(uintptr_t mainTask, uintptr_t battleCtx,
 static void ObservePendingDeployment(uintptr_t battleCtx, int32_t state) {
     if (!g_PendingDeployment) return;
     const int32_t deployed = CountControllablePlayerUnits();
-    if (deployed > g_PendingDeploymentCount) {
-        const int32_t added = deployed - g_PendingDeploymentCount;
+    bool selectedObserved = false;
+    if (g_PendingDeploymentIdentity) for (int i=0;i<Combat::kMaxUnits;++i) {
+        const uintptr_t unit=GetUnitPtr(i);
+        if (!IsUnitAliveAndDeployed(unit) || !fnIsControllableUnit((void*)unit,0)) continue;
+        const uintptr_t chara=*reinterpret_cast<const uintptr_t*>(unit+0x240);
+        if (*reinterpret_cast<const uint64_t*>(chara+0x3060)==g_PendingDeploymentIdentity) {selectedObserved=true;break;}
+    }
+    if (g_PendingDeploymentIdentity ? selectedObserved : deployed > g_PendingDeploymentCount) {
+        const int32_t added = g_PendingDeploymentIdentity ? 1 : deployed - g_PendingDeploymentCount;
         g_DeployCountThisStage += added;
         g_BasePanelExhaustedThisTurn = false;
         TeamPlanning::Reset("deployment changed");
-        LogMsg("[Deploy] Observed %d new deployed player unit(s); stage count=%d",
-               added, g_DeployCountThisStage);
+        LogMsg("[Deploy] Observed %d new deployed player unit(s); serial=%llu stage count=%d",
+               added, g_PendingDeploymentIdentity,g_DeployCountThisStage);
         g_PendingDeployment = false;
+        g_PendingDeploymentIdentity = 0;
         g_PendingDeploymentTicks = 0;
+        return;
+    }
+    if (g_PendingDeploymentIdentity && deployed>g_PendingDeploymentCount) {
+        LogMsg("[Deploy] Rejected observed dispatch: expectedSerial=%llu livingCount=%d",g_PendingDeploymentIdentity,deployed);
+        g_PendingDeployment=false;g_PendingDeploymentIdentity=0;
+        PauseForDeployment("The engine deployed a different hero than selected");
         return;
     }
     if (state == 0x0C || state == 0x11 || state == 0x12 || state == 0x05) {
@@ -207,6 +230,7 @@ static void ObservePendingDeployment(uintptr_t battleCtx, int32_t state) {
     g_PendingDeployment = false;
     g_PendingDeploymentTicks = 0;
     if (++g_DeploymentFailures >= 2) g_BasePanelExhaustedThisTurn = true;
+    g_PendingDeploymentIdentity = 0;
 }
 
 static bool GetPendingOrBestMoveTarget(int32_t unitIdx, int& targetX, int& targetZ) {
@@ -327,7 +351,7 @@ static void ToggleAutoPlay(const char* source) {
     LogMsg("Auto-Play toggled %s via %s", g_Enabled ? "ON" : "OFF", source);
 }
 
-static void PollHotkeys(WORD padButtons) {
+static void PollHotkeys(WORD padButtons, bool controllerSample = false) {
     bool f1Down = (GetAsyncKeyState(VK_F1) & 0x8000) != 0;
     if (f1Down && !g_PrevToggleKey) {
         ToggleAutoPlay("Keyboard F1");
@@ -341,11 +365,40 @@ static void PollHotkeys(WORD padButtons) {
         LogMsg("[Repeat] F2 toggled %s independently of F1=%d", enabled ? "ON" : "OFF", g_Enabled ? 1 : 0);
     }
 
-    bool padCombo = ((padButtons & (XBTN_BACK | XBTN_RIGHT_THUMB)) == (XBTN_BACK | XBTN_RIGHT_THUMB));
-    if (padCombo && !g_PrevPadCombo) {
-        ToggleAutoPlay("Controller Back+R3");
+    const bool partyKey = (GetAsyncKeyState(VK_F3)&0x8000)!=0;
+    DWORD foregroundPid=0;
+    GetWindowThreadProcessId(GetForegroundWindow(),&foregroundPid);
+    if (partyKey && !g_PrevPartyKey && foregroundPid==GetCurrentProcessId()) PartyRuntime::toggleRequested.store(true);
+    g_PrevPartyKey=partyKey;
+    if (controllerSample) {
+        PartyRuntime::physicalPad.store(padButtons);
+        const bool padCombo = (padButtons & (XBTN_BACK|XBTN_RIGHT_THUMB|XBTN_LEFT_THUMB)) == (XBTN_BACK|XBTN_RIGHT_THUMB);
+        if (padCombo && !g_PrevPadCombo) ToggleAutoPlay("Controller Back+R3");
+        g_PrevPadCombo=padCombo;
+        const bool partyCombo = (padButtons & (XBTN_BACK|XBTN_RIGHT_THUMB|XBTN_LEFT_THUMB)) == (XBTN_BACK|XBTN_LEFT_THUMB);
+        if (partyCombo && !g_PrevPartyCombo && foregroundPid==GetCurrentProcessId()) PartyRuntime::toggleRequested.store(true);
+        g_PrevPartyCombo=partyCombo;
     }
-    g_PrevPadCombo = padCombo;
+}
+
+static void InvalidateForPartyMenu() {
+    TeamPlanning::Reset("party editor boundary");
+    g_GoalJob={};g_MovementJob={};g_DeploymentJob={};
+    g_DeploymentPlanning=false;g_TacticalActor=-1;g_TacticalRouteStarted=false;
+    g_PulseAction=g_HoldAction=-1;g_StateStuckTicks=0;g_ActionAttemptTicks=0;
+}
+
+static void PauseForDeployment(const char* reason) {
+    g_Enabled=false;g_PulseAction=g_HoldAction=-1;
+    UpdateWindowTitleIndicator();
+    LogMsg("[Party] Autoplay paused: %s",reason);
+    uintptr_t foreground=0;
+    if (NativePartyMenu::available && NativeNotifications::Foreground(g_Base,foreground) && !foreground) {
+        using Notice=void(__fastcall*)(int,int,int,int,int,float,uintptr_t,const void*,const char*,const char*);
+        std::string text=NativePartyMenu::Bounded(std::string("Autoplay paused: ")+reason+". F3 opens party settings.");
+        reinterpret_cast<Notice>(g_Base+0x2B3BB0)(1,1,-1,0,0x37,1.0f,0,
+            reinterpret_cast<const void*>(g_Base+0xA17C34),text.c_str(),nullptr);
+    }
 }
 
 static uint64_t GetActionVirtualKey(int32_t actionId) {
@@ -560,7 +613,9 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
     }
 
     FinishPendingMoveIfObserved(mainTask, battleCtx, state);
+    const bool wasEnabledBeforeDeploymentObservation=g_Enabled;
     ObservePendingDeployment(battleCtx, state);
+    if(wasEnabledBeforeDeploymentObservation && !g_Enabled)return;
     if (SmartCombat::ObserveQueue(battleCtx)) TeamPlanning::Reset("queue acceptance");
 
     // Wait while state transition is pending
@@ -645,7 +700,7 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
         break;
 
     case 0x0C: // Base Panel Character Dispatch Menu (+0x141510, cmd=0x32)
-        if (SmartCombatAvailable()) {
+        if (SmartCombatAvailable() || PartyRuntime::Policy().custom) {
             const uintptr_t task = mainTask + 0x141510;
             if (g_StateStuckTicks < 3 || *(int32_t*)(task + 0x2C) == 2) break;
             if (g_PendingDeployment) break;
@@ -657,7 +712,7 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
                 if (!Planning::Available()) break;
                 g_DeploymentTiming = {};
                 auto snapshot = NativeCombat::CaptureSnapshot(battleCtx, SmartCombat::accepted);
-                g_DeploymentJob.Begin(battleCtx, snapshot);
+                g_DeploymentJob.Begin(battleCtx, snapshot, PartyRuntime::Policy());
                 g_DeploymentPlanning = true;
             }
             if (!Planning::Run("deployment", g_DeploymentTiming, [] { return g_DeploymentJob.IsComplete(); },
@@ -678,10 +733,14 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
             g_PendingDeployment = true;
             g_PendingDeploymentCount = CountControllablePlayerUnits();
             g_PendingDeploymentTicks = 0;
+            g_PendingDeploymentIdentity = g_DeploymentJob.selectedIdentity;
             g_DeploymentPlanning = false;
             g_PulseAction = ACT_CONFIRM; g_CooldownTicks = 5;
-            LogMsg("[Deploy] Selecting roster=%d nativeRow=%d healer=%d",
-                g_DeploymentJob.SelectedRoster(), g_DeploymentJob.SelectedRow(), g_DeploymentJob.SelectedIsHealer());
+            char deploymentName[53]{};
+            if(g_DeploymentJob.selectedCharaData)memcpy(deploymentName,reinterpret_cast<const void*>(g_DeploymentJob.selectedCharaData+0xBC8),52);
+            LogMsg("[Deploy] Selecting name=%s serial=%llu roster=%d sourceRow=%d visibleRow=%d healer=%d",
+                deploymentName,g_DeploymentJob.selectedIdentity,g_DeploymentJob.SelectedRoster(),g_DeploymentJob.SelectedRow(),
+                *reinterpret_cast<const int*>(task+NativeDeployment::kTaskRosterCursorOffset),g_DeploymentJob.SelectedIsHealer());
             break;
         }
         [[fallthrough]];
@@ -693,6 +752,7 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
         if (g_StateStuckTicks > 20) {
             g_BasePanelExhaustedThisTurn = true;
             g_PendingDeployment = false;
+            g_PendingDeploymentIdentity = 0;
             g_PendingDeploymentTicks = 0;
             g_PulseAction = ACT_CANCEL;
             g_CooldownTicks = 8;
@@ -740,13 +800,6 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
             }
             int ex = 0, ez = 0;
             int nearestEnemy = FindNearestEnemy(0, 0, ex, ez);
-            if (nearestEnemy < 0) {
-                LogMsg("[State 0x02] No living enemies found; ending turn");
-                EmitSubTaskCommand(mapCursorTask, 0x4E21, 0);
-                g_PulseAction = ACT_END_SHORT;
-                g_CooldownTicks = 20;
-                break;
-            }
 
             // 1. Check Base Panel tile position and whether a unit is currently standing on it
             float bpWX = 0, bpWY = 0, bpWZ = 0;
@@ -782,14 +835,22 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
                 break;
             }
 
-            // 2. Deploy up to 5 controllable player units from Base Panel if Base Panel is unoccupied
+            // 2. Replenish the active party before the enemy-recognition guard.
             int deployedPlayers = CountControllablePlayerUnits();
+            const auto deploymentPolicy=PartyRuntime::Policy();
+            const int nativeCapacity=*reinterpret_cast<const uint8_t*>(g_Base+0x5574AAE);
+            if (g_EligibilityLiving>=0 && (g_EligibilityLiving!=deployedPlayers ||
+                g_EligibilityCapacity!=nativeCapacity || g_EligibilityOccupant!=unitOnBasePanelIdx)) {
+                g_BasePanelExhaustedThisTurn=false;g_DeploymentFailures=0;g_DeploymentPlanning=false;
+            }
+            g_EligibilityLiving=deployedPlayers;g_EligibilityCapacity=nativeCapacity;g_EligibilityOccupant=unitOnBasePanelIdx;
+            int16_t deployableCount=0;
             if (hasBasePanel && unitOnBasePanelIdx < 0 && !g_BasePanelExhaustedThisTurn &&
-                deployedPlayers < 5 && g_DeployCountThisStage < 10) {
+                deploymentPolicy.CanAdd(deployedPlayers) && nativeCapacity>0) {
                 if (battleCtx && fnPopulateDeployUnits) {
                     fnPopulateDeployUnits((void*)battleCtx);
                 }
-                int16_t deployableCount = battleCtx ? *(int16_t*)(battleCtx + 0x968) : 0;
+                deployableCount = battleCtx ? *(int16_t*)(battleCtx + 0x968) : 0;
                 if (deployableCount > 0) {
                     SnapCursorToWorldPos(battleCtx, bpWX, bpWY, bpWZ);
                     g_ActionAttemptTicks++;
@@ -804,6 +865,17 @@ static void StepBattleDecision(uintptr_t mainTask, uintptr_t battleCtx,
                 } else {
                     g_BasePanelExhaustedThisTurn = true;
                 }
+            }
+
+            if (deployedPlayers==0) {
+                const char* reason=!hasBasePanel?"No Base Panel is available":unitOnBasePanelIdx>=0?"The Base Panel is occupied":
+                    nativeCapacity<=0?"The native deployment limit is reached":g_BasePanelExhaustedThisTurn?"No verified reserve can be deployed":
+                    deployableCount<=0?"No living eligible reserves remain":"Deployment could not make progress";
+                PauseForDeployment(reason);break;
+            }
+            if (nearestEnemy < 0) {
+                LogMsg("[State 0x02] No recognized living enemies after party replenishment; ending turn");
+                EmitSubTaskCommand(mapCursorTask,0x4E21,0);g_PulseAction=ACT_END_SHORT;g_CooldownTicks=20;break;
             }
 
             // 3. Otherwise select the next controllable player unit that hasn't finished its turn
@@ -1023,10 +1095,15 @@ static void PublishRepeatStop() {
     if (!NativeRepeat::controller.enabled() && g_RepeatRequested.exchange(false)) UpdateWindowTitleIndicator();
 }
 static uint64_t __fastcall Hooked_BaseSceneUpdate() {
+    PartyRuntime::TryInstallSceneHooks();
     PollHotkeys(0); SyncRepeatToggle();
+    PartyRuntime::battle.Finished();
+    NativeScenes::Registry partyScene;
+    const bool safeParty=NativeScenes::ReadRegistry(g_Base,partyScene) && NativeScenes::Settled(partyScene,8);
+    if(PartyRuntime::Pump(g_Base,safeParty)){PartyRuntime::ScopedReleaseInput block(g_Base);return orig_BaseSceneUpdate();}
     if (NativeRepeat::controller.enabled()) {
         StageRepeat::Observation o;
-        o.screen = StageRepeat::Screen::Hub; o.ready = o.settled = true; o.nowMs = GetTickCount64();
+        o.screen = StageRepeat::Screen::Hub; o.ready = o.settled = true; o.nowMs = NativeRepeat::readClock();
         NativeRepeat::Tick(o); PublishRepeatStop();
     }
     return orig_BaseSceneUpdate();
@@ -1039,7 +1116,14 @@ static void TryInstallBaseSceneHook() {
 static void __fastcall Hooked_SelectorExecute(void* task, int callType) {
     bool confirm = false;
     if (callType == 4) {
-        PollHotkeys(0); SyncRepeatToggle(); TryInstallBaseSceneHook();
+        PollHotkeys(0); SyncRepeatToggle(); TryInstallBaseSceneHook();PartyRuntime::TryInstallSceneHooks();
+        PartyRuntime::battle.Finished();
+        NativeRepeat::Selector partySelector;
+        NativeScenes::Registry partyScene;
+        const bool partySafe=NativeScenes::ReadRegistry(g_Base,partyScene) && NativeScenes::Settled(partyScene,9) &&
+            NativeRepeat::ReadSelector(g_Base,reinterpret_cast<uintptr_t>(task),{},partySelector) &&
+            partySelector.observation.settled && NativeRepeat::controller.pending().command==StageRepeat::Command::None;
+        if(PartyRuntime::Pump(g_Base,partySafe)) {PartyRuntime::ScopedReleaseInput block(g_Base);orig_SelectorExecute(task,callType);return;}
         if (NativeRepeat::controller.enabled()) {
             NativeRepeat::Selector selector;
             if (NativeRepeat::ReadSelector(g_Base, reinterpret_cast<uintptr_t>(task), NativeRepeat::controller.stage(), selector)) {
@@ -1068,6 +1152,7 @@ static void __fastcall Hooked_SelectorExecute(void* task, int callType) {
 }
 static uint32_t __fastcall Hooked_EntryChoiceUpdate(void* object) {
     PollHotkeys(0); SyncRepeatToggle();
+    if(PartyRuntime::Pump(g_Base,false)) {PartyRuntime::ScopedReleaseInput block(g_Base);return orig_EntryChoiceUpdate(object);}
     bool confirm = false;
     uintptr_t selectorTask = 0;
     NativeRepeat::Selector selector;
@@ -1110,6 +1195,12 @@ static uint32_t __fastcall Hooked_EntryChoiceUpdate(void* object) {
 static uint64_t __fastcall Hooked_NotificationUpdate(void* notification) {
     PollHotkeys(0);
     SyncRepeatToggle();
+    if (PartyRuntime::Pump(g_Base,false)) {
+        if(reinterpret_cast<uintptr_t>(notification)==NativePartyMenu::object)
+            return NativePartyMenu::Update(g_Base,orig_NotificationUpdate);
+        PartyRuntime::ScopedReleaseInput blocked(g_Base);
+        return orig_NotificationUpdate(notification);
+    }
     bool repeatOwns = false;
     if (NativeRepeat::controller.enabled()) {
         StageRepeat::Observation observation;
@@ -1133,6 +1224,7 @@ static uint64_t __fastcall Hooked_NotificationUpdate(void* notification) {
 
 static void __fastcall Hooked_BattleMainTask_Execute(void* mainTask, int callType) {
     if (callType == 4 && mainTask != nullptr) {
+        struct RestoreDeploymentView { ~RestoreDeploymentView(){g_DeploymentJob.selectionView.Restore();} } restoreView;
         // Observe while F1 is off too: it may be enabled behind a modal.
         g_NotificationBattleTask = reinterpret_cast<uintptr_t>(mainTask);
         g_TickCount++;
@@ -1140,7 +1232,21 @@ static void __fastcall Hooked_BattleMainTask_Execute(void* mainTask, int callTyp
 
         g_PulseAction = -1;
         g_HoldAction  = -1;
-        SyncRepeatToggle(); TryInstallBaseSceneHook();
+        SyncRepeatToggle(); TryInstallBaseSceneHook();PartyRuntime::TryInstallSceneHooks();
+        PartyRuntime::wasTitle=false;
+        PartyRuntime::ObserveBattle(g_Base,reinterpret_cast<uintptr_t>(mainTask));
+        const int partyState=*reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(mainTask)+0x14);
+        const int partyTransition=*reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(mainTask)+0x2C);
+        const uintptr_t partyContext=*reinterpret_cast<const uintptr_t*>(g_Base+RVA::PTR_BattleContext);
+        const bool partySafe=partyTransition!=2 && !g_PendingDeployment && !g_PendingMove &&
+            !SmartCombat::pending.valid && NativeRepeat::controller.pending().command==StageRepeat::Command::None &&
+            (partyState==0x32 || (partyState==0x02 &&
+                *reinterpret_cast<const int32_t*>(reinterpret_cast<uintptr_t>(mainTask)+0x11E0+0x14)==0 &&
+                partyContext && NativeCombat::QueueCount(partyContext)==0));
+        if(PartyRuntime::Pump(g_Base,partySafe) || PartyRuntime::IsScopePending()) {
+            PartyRuntime::ScopedReleaseInput blocked(g_Base);
+            orig_BattleExecute(mainTask,callType);return;
+        }
 #ifdef D5_NATIVE_NOTIFICATION_QA
         NativeNotificationQA::MaybeQueue(g_Base, reinterpret_cast<uintptr_t>(mainTask), g_Enabled);
 #endif
@@ -1227,9 +1333,9 @@ static void __fastcall Hooked_BattleMainTask_Execute(void* mainTask, int callTyp
     orig_BattleExecute(mainTask, callType);
 }
 
-void InitializeMod() {
+void InitializeMod(HMODULE module = nullptr) {
     g_Base = (uintptr_t)GetModuleHandleW(nullptr);
-    LogMsg("=== Disgaea 5 Complete Auto-Play Mod v5.4.2 low-latency planning Initializing ===");
+    LogMsg("=== Disgaea 5 Complete Auto-Play Mod v5.5.2 late surrender notification repair Initializing ===");
 #ifdef D5_NATIVE_NOTIFICATION_QA
     LogMsg("[NativeQA] DEVELOPMENT build: two synthetic-text native notification tests enabled");
 #endif
@@ -1253,7 +1359,11 @@ void InitializeMod() {
     NativeSkills::Initialize(g_Base);
     NativeActions::Initialize(g_Base);
     NativeEffects::Initialize(g_Base);
+    NativeDeploymentView::Initialize(g_Base);
     NativeActions::evaluateEffect = &NativeEffects::Evaluate;
+    PartyRuntime::invalidatePlanning=&InvalidateForPartyMenu;
+    PartyRuntime::pollKeys=[](){PollHotkeys(0);};
+    PartyRuntime::Initialize(module);
     TryInstallBaseSceneHook();
     uintptr_t* entryChoiceSlot = reinterpret_cast<uintptr_t*>(g_Base + NativeRepeat::kEntryChoiceVtable + 0x10);
     if (*entryChoiceSlot == g_Base + NativeRepeat::kEntryChoiceUpdate) {
@@ -1338,8 +1448,10 @@ extern "C" DWORD WINAPI XInputGetState(DWORD dwUserIndex, XINPUT_STATE_DATA* pSt
     DWORD res = orig_XInputGetState ? orig_XInputGetState(dwUserIndex, pState) : ERROR_DEVICE_NOT_CONNECTED;
     if (dwUserIndex == 0) {
         WORD buttons = (res == ERROR_SUCCESS && pState) ? pState->Gamepad.wButtons : 0;
-        AutoPlay::PollHotkeys(buttons);
+        AutoPlay::PollHotkeys(buttons,true);
         if (AutoPlay::g_Base) AutoPlay::TryInstallBaseSceneHook();
+        if (AutoPlay::g_Base) AutoPlay::PartyRuntime::TryInstallSceneHooks();
+        if (pState && AutoPlay::PartyRuntime::releasing.load()) pState->Gamepad={};
     }
     return res;
 }
@@ -1363,7 +1475,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         EnsureSystemXInputLoaded();
-        AutoPlay::InitializeMod();
+        AutoPlay::InitializeMod(hModule);
     }
     return TRUE;
 }

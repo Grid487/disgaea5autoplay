@@ -2,6 +2,8 @@
 
 #include "native_effects.h"
 #include "native_geometry.h"
+#include "party_roster.h"
+#include "native_deployment_view.h"
 
 #include <algorithm>
 #include <array>
@@ -245,9 +247,15 @@ struct Job {
     size_t deployedEntryIndex = 0;
     std::vector<EnemyProfile> enemies;
     size_t nextRosterRow = 0;
+    Party::DeploymentPolicy policy{};
+    uint64_t selectedIdentity = 0;
+    NativeDeploymentView::Override selectionView;
 
-    void Begin(uintptr_t battleContext, const Combat::BattleSnapshot& snapshot) {
+    void Begin(uintptr_t battleContext, const Combat::BattleSnapshot& snapshot,
+               const Party::DeploymentPolicy& requestedPolicy = {}) {
+        selectionView.Restore();
         *this = Job{};
+        policy = requestedPolicy;
         started = true;
         context = battleContext;
         if (!context || !AutoPlay::g_Base) { complete = true; return; }
@@ -265,7 +273,7 @@ struct Job {
 
         for (int i = 0; i < Combat::kMaxUnits; ++i) {
             const auto& unit = snapshot.units[static_cast<size_t>(i)];
-            if (unit.index != i || unit.faction != Combat::Faction::Player || !unit.deployed) continue;
+            if (unit.index != i || unit.faction != Combat::Faction::Player || !unit.deployed || !unit.alive) continue;
             ++deployedCount;
             if (unit.alive && unit.hasVerifiedHealingSkill &&
                 std::isfinite(unit.cheapestHealingSp) && unit.cheapestHealingSp >= 0.0 &&
@@ -274,9 +282,32 @@ struct Job {
             if (unit.alive) deployedPlayers.push_back(i);
         }
         enemies = ReadEnemies(snapshot);
-        if (deployedCount >= Combat::kMaxDeployments || availableRows.empty()) {
+        if (!policy.CanAdd(deployedCount) || availableRows.empty()) {
             complete = true;
             return;
+        }
+        // Explicit heroes need no full-roster skill/damage search. Preserve the
+        // player's order and validate the current native row again at dispatch.
+        if (policy.custom) {
+            for (const auto key : policy.preferred) {
+                const Row* match = nullptr;
+                bool ambiguous = false;
+                for (const Row& row : availableRows) {
+                    const auto serial = *reinterpret_cast<const uint64_t*>(row.charaData + 0x3060);
+                    if (serial != key) continue;
+                    if (match) { ambiguous = true; break; }
+                    match = &row;
+                }
+                if (ambiguous) { complete = true; return; }
+                if (!match || *reinterpret_cast<const int64_t*>(match->charaData + 0x2CC8) <= 0 ||
+                    *reinterpret_cast<const int64_t*>(match->charaData + 0x2CD8) <= 0) continue;
+                selectedRow = match->menuRow;
+                selectedRoster = match->rosterOrdinal;
+                selectedCharaData = match->charaData;
+                selectedIdentity = key;
+                complete = true;
+                return;
+            }
         }
         if (deployedHealerFound) deployedPlayers.clear();
     }
@@ -430,6 +461,7 @@ struct Job {
         selectedRow = selected->row.menuRow;
         selectedRoster = selected->row.rosterOrdinal;
         selectedCharaData = selected->row.charaData;
+        selectedIdentity = *reinterpret_cast<const uint64_t*>(selectedCharaData + 0x3060);
         selectedIsHealer = selected == bestHealer && !deployedHealerFound;
         selectedHealingScore = selected->healingScore;
         selectedHealingCost = selected->cheapestHealingSp;
@@ -510,7 +542,7 @@ struct Job {
     int SelectedRoster() const { return complete ? selectedRoster : -1; }
     bool SelectedIsHealer() const { return complete && selectedIsHealer; }
 
-    bool SelectCursor(uintptr_t task, uintptr_t currentContext) const {
+    bool SelectCursor(uintptr_t task, uintptr_t currentContext) {
         if (!complete || selectedRow < 0 || selectedRoster < 0 || !task || !currentContext ||
             currentContext != context || !AutoPlay::g_Base) return false;
         if (*reinterpret_cast<const uintptr_t*>(task + kTaskBattleContextOffset) != currentContext)
@@ -524,12 +556,13 @@ struct Job {
             return false;
         const uintptr_t charaData = RosterCharaData(ordinal);
         if (!charaData || charaData != selectedCharaData) return false;
+        if (selectedIdentity && *reinterpret_cast<const uint64_t*>(charaData + 0x3060) != selectedIdentity)
+            return false;
         if (*reinterpret_cast<const int64_t*>(charaData + 0x2CC8) <= 0 ||
             *reinterpret_cast<const int64_t*>(charaData + 0x2CD8) <= 0) return false;
         if (selectedIsHealer && *reinterpret_cast<const int64_t*>(charaData + 0x2CD0) < selectedHealingCost)
             return false;
-        *reinterpret_cast<int32_t*>(task + kTaskRosterCursorOffset) = selectedRow;
-        return true;
+        return selectionView.Select(AutoPlay::g_Base,task,currentCount,selectedRow,charaData,selectedIdentity);
     }
 };
 
